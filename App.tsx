@@ -2,7 +2,7 @@ import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react'
 import {
   LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip as ReTooltip, ResponsiveContainer,
   BarChart, Bar, Legend, PieChart, Pie, Cell, AreaChart, Area, RadarChart, Radar, PolarGrid,
-  PolarAngleAxis, PolarRadiusAxis, ScatterChart, Scatter, ZAxis
+  PolarAngleAxis, PolarRadiusAxis, ScatterChart, Scatter, ZAxis, ComposedChart
 } from 'recharts';
 import * as Lucide from 'lucide-react';
 
@@ -59,6 +59,9 @@ export default function App() {
   });
   const [showFilters, setShowFilters] = useState(false);
 
+  // State: Network Selection
+  const [networkNode, setNetworkNode] = useState<{ id: string, type: 'supplier' | 'category' | 'customer' } | null>(null);
+
   // State: Agents
   const [agentsYaml, setAgentsYaml] = useState(DEFAULT_AGENTS_YAML);
   const [skillMd, setSkillMd] = useState(DEFAULT_SKILL_MD);
@@ -72,6 +75,7 @@ export default function App() {
   // Derived Values
   const t = I18N[lang];
   const currentSkin = SKINS[skin];
+  const chartColors = [currentSkin.accent, '#4ADE80', '#F472B6', '#FACC15', '#60A5FA', '#A78BFA'];
 
   // Apply Theme & Skin
   useEffect(() => {
@@ -218,7 +222,7 @@ export default function App() {
     return res;
   }, [data, filters]);
 
-  // --- Chart Data Aggregation ---
+  // --- Chart Data Aggregation (Dashboard) ---
   const trendData = useMemo(() => {
     const agg: Record<string, number> = {};
     filteredData.forEach(r => {
@@ -239,14 +243,12 @@ export default function App() {
         .slice(0, filters.topN);
   }, [filteredData, filters.topN]);
 
-  // 1. Supplier Top 10
   const supplierData = useMemo(() => {
     const agg: Record<string, number> = {};
     filteredData.forEach(r => { agg[r.SupplierID] = (agg[r.SupplierID] || 0) + r.Number; });
     return Object.entries(agg).map(([name, value]) => ({ name, value })).sort((a,b) => b.value - a.value).slice(0, 10);
   }, [filteredData]);
 
-  // 2. Customer Share (Pie)
   const customerData = useMemo(() => {
     const agg: Record<string, number> = {};
     filteredData.forEach(r => { agg[r.CustomerID] = (agg[r.CustomerID] || 0) + r.Number; });
@@ -257,7 +259,6 @@ export default function App() {
     return top5;
   }, [filteredData]);
 
-  // 3. Cumulative Units
   const cumulativeData = useMemo(() => {
     let acc = 0;
     return trendData.map(d => {
@@ -266,14 +267,12 @@ export default function App() {
     });
   }, [trendData]);
 
-  // 4. Model Stats
   const modelData = useMemo(() => {
     const agg: Record<string, number> = {};
     filteredData.forEach(r => { if(r.Model) agg[r.Model] = (agg[r.Model] || 0) + r.Number; });
     return Object.entries(agg).map(([name, value]) => ({ name, value })).sort((a,b) => b.value - a.value).slice(0, 10);
   }, [filteredData]);
 
-  // 5. Weekly Pattern (Radar)
   const dayOfWeekData = useMemo(() => {
     const days = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
     const agg = [0,0,0,0,0,0,0];
@@ -285,7 +284,6 @@ export default function App() {
     return days.map((day, i) => ({ subject: day, A: agg[i], fullMark: Math.max(...agg) }));
   }, [filteredData]);
 
-  // 6. Returns Analysis
   const returnsData = useMemo(() => {
     const agg: Record<string, number> = {};
     filteredData.filter(r => r.Number < 0).forEach(r => {
@@ -294,14 +292,72 @@ export default function App() {
     return Object.entries(agg).map(([name, value]) => ({ name, value })).sort((a,b) => b.value - a.value).slice(0, 5);
   }, [filteredData]);
 
+
+  // --- Network Analysis Chart Data ---
+  const networkChartsData = useMemo(() => {
+    // Default context: Whole network stats
+    let contextData = filteredData;
+    let title = "Global Network Overview";
+    
+    // Node context
+    if (networkNode) {
+        title = `${networkNode.type.toUpperCase()}: ${networkNode.id}`;
+        if (networkNode.type === 'supplier') {
+            contextData = filteredData.filter(r => r.SupplierID === networkNode.id);
+        } else if (networkNode.type === 'category') {
+            contextData = filteredData.filter(r => r.Category === networkNode.id);
+        } else if (networkNode.type === 'customer') {
+            contextData = filteredData.filter(r => r.CustomerID === networkNode.id);
+        }
+    }
+
+    // Chart 1: Connection Strength (Interactions)
+    const interactionAgg: Record<string, number> = {};
+    contextData.forEach(r => {
+        // Decide what to show based on type
+        let key = r.Category; // Default
+        if (networkNode?.type === 'supplier') key = r.CustomerID; // Supplier -> Customer
+        if (networkNode?.type === 'customer') key = r.SupplierID; // Customer -> Supplier
+        if (networkNode?.type === 'category') key = r.SupplierID; // Category -> Supplier
+        
+        interactionAgg[key] = (interactionAgg[key] || 0) + r.Number;
+    });
+    const chart1Data = Object.entries(interactionAgg)
+        .map(([name, value]) => ({ name, value }))
+        .sort((a,b) => b.value - a.value)
+        .slice(0, 8);
+
+    // Chart 2: Temporal Pulse (Time Series)
+    const timeAgg: Record<string, number> = {};
+    contextData.forEach(r => {
+        const d = r.Deliverdate.substring(4); // MMDD
+        timeAgg[d] = (timeAgg[d] || 0) + r.Number;
+    });
+    const chart2Data = Object.entries(timeAgg)
+        .map(([date, val]) => ({ date, val }))
+        .sort((a,b) => a.date.localeCompare(b.date));
+
+    // Chart 3: Composition (Products/Models)
+    const compAgg: Record<string, number> = {};
+    contextData.forEach(r => {
+        const key = r.Model || r.DeviceNAME || 'Unknown';
+        compAgg[key] = (compAgg[key] || 0) + r.Number;
+    });
+    const chart3Data = Object.entries(compAgg)
+        .map(([name, value]) => ({ name, value }))
+        .sort((a,b) => b.value - a.value)
+        .slice(0, 6);
+
+    return { title, chart1Data, chart2Data, chart3Data };
+
+  }, [filteredData, networkNode]);
+
   // Styles
   const appStyle = {
     background: `linear-gradient(135deg, ${currentSkin.bgFrom} 0%, ${currentSkin.bgTo} 100%)`,
     color: currentSkin.text,
     fontFamily: currentSkin.font.includes('serif') ? 'serif' : 'sans-serif'
   };
-
-  const chartColors = [currentSkin.accent, '#4ADE80', '#F472B6', '#FACC15', '#60A5FA', '#A78BFA'];
 
   return (
     <div className={`min-h-screen w-full transition-colors duration-500 ${currentSkin.font} overflow-x-hidden`} style={appStyle}>
@@ -601,15 +657,103 @@ export default function App() {
 
             {/* --- NETWORK --- */}
             {activeTab === 'network' && (
-                <div className="h-[80vh] w-full">
-                    <Card className="h-full p-0 overflow-hidden relative">
-                         <div className="absolute top-4 left-4 z-10 glass-panel px-4 py-2 rounded-lg">
-                            <h3 className="font-bold mb-2 text-sm">{t.network} Settings</h3>
-                            <label className="text-xs block mb-1">Top N: {filters.topN}</label>
-                            <input type="range" min="5" max="50" value={filters.topN} onChange={(e) => setFilters({...filters, topN: parseInt(e.target.value)})} className="w-full accent-white"/>
-                         </div>
-                         <NetworkGraph data={filteredData} topN={filters.topN} width={1200} height={800} />
-                    </Card>
+                <div className="h-[80vh] w-full flex gap-6">
+                    {/* Graph Area */}
+                    <div className="flex-grow h-full flex flex-col gap-4">
+                        <Card className="flex-1 p-0 overflow-hidden relative">
+                            <div className="absolute top-4 left-4 z-10 glass-panel px-4 py-2 rounded-lg pointer-events-auto">
+                                <h3 className="font-bold mb-2 text-sm">{t.network} Settings</h3>
+                                <label className="text-xs block mb-1">Top N: {filters.topN}</label>
+                                <input type="range" min="5" max="50" value={filters.topN} onChange={(e) => setFilters({...filters, topN: parseInt(e.target.value)})} className="w-full accent-white"/>
+                            </div>
+                            <NetworkGraph 
+                                data={filteredData} 
+                                topN={filters.topN} 
+                                width={800} 
+                                height={800}
+                                onNodeClick={setNetworkNode}
+                                selectedNodeId={networkNode?.id}
+                            />
+                        </Card>
+                    </div>
+                    
+                    {/* Analytics Sidebar */}
+                    <div className="w-[400px] flex flex-col gap-4 overflow-y-auto">
+                        <Card className="bg-white/5 border-l-4 border-l-yellow-400">
+                             <div className="flex justify-between items-start">
+                                <div>
+                                    <h3 className="text-xs font-bold uppercase opacity-50 mb-1">Active Context</h3>
+                                    <h2 className="text-lg font-bold truncate max-w-[250px]">
+                                        {networkChartsData.title}
+                                    </h2>
+                                </div>
+                                {networkNode && (
+                                    <button onClick={() => setNetworkNode(null)} className="p-1 hover:bg-white/10 rounded">
+                                        <Lucide.X size={16}/>
+                                    </button>
+                                )}
+                             </div>
+                        </Card>
+
+                        {/* Chart 1: Connection Strength */}
+                        <Card className="min-h-[200px]">
+                            <h4 className="text-xs font-bold uppercase opacity-70 mb-2">
+                                {networkNode ? "Top Connections" : "Network Hubs"}
+                            </h4>
+                            <div className="h-[150px]">
+                                <ResponsiveContainer width="100%" height="100%">
+                                    <BarChart layout="vertical" data={networkChartsData.chart1Data}>
+                                        <XAxis type="number" hide />
+                                        <YAxis dataKey="name" type="category" width={80} stroke="currentColor" style={{fontSize: 9}} tickFormatter={(v) => v.substring(0,10)}/>
+                                        <ReTooltip contentStyle={{backgroundColor: '#000', border: 'none', borderRadius: '8px'}}/>
+                                        <Bar dataKey="value" fill={chartColors[0]} radius={[0, 4, 4, 0]} />
+                                    </BarChart>
+                                </ResponsiveContainer>
+                            </div>
+                        </Card>
+
+                        {/* Chart 2: Temporal Pulse */}
+                        <Card className="min-h-[200px]">
+                            <h4 className="text-xs font-bold uppercase opacity-70 mb-2">
+                                {networkNode ? "Activity Pulse" : "Network Rhythm"}
+                            </h4>
+                            <div className="h-[150px]">
+                                <ResponsiveContainer width="100%" height="100%">
+                                    <AreaChart data={networkChartsData.chart2Data}>
+                                        <defs>
+                                            <linearGradient id="netPulse" x1="0" y1="0" x2="0" y2="1">
+                                                <stop offset="5%" stopColor={chartColors[1]} stopOpacity={0.8}/>
+                                                <stop offset="95%" stopColor={chartColors[1]} stopOpacity={0}/>
+                                            </linearGradient>
+                                        </defs>
+                                        <XAxis dataKey="date" hide />
+                                        <YAxis hide />
+                                        <ReTooltip contentStyle={{backgroundColor: '#000', border: 'none', borderRadius: '8px'}}/>
+                                        <Area type="monotone" dataKey="val" stroke={chartColors[1]} fill="url(#netPulse)" />
+                                    </AreaChart>
+                                </ResponsiveContainer>
+                            </div>
+                        </Card>
+
+                        {/* Chart 3: Composition */}
+                        <Card className="min-h-[200px]">
+                             <h4 className="text-xs font-bold uppercase opacity-70 mb-2">
+                                {networkNode ? "Product Mix" : "Model Diversity"}
+                            </h4>
+                            <div className="h-[150px]">
+                                <ResponsiveContainer width="100%" height="100%">
+                                    <PieChart>
+                                        <Pie data={networkChartsData.chart3Data} cx="50%" cy="50%" innerRadius={30} outerRadius={60} paddingAngle={5} dataKey="value">
+                                            {networkChartsData.chart3Data.map((entry, index) => (
+                                                <Cell key={`cell-${index}`} fill={chartColors[index % chartColors.length]} />
+                                            ))}
+                                        </Pie>
+                                        <ReTooltip contentStyle={{backgroundColor: '#000', border: 'none', borderRadius: '8px'}}/>
+                                    </PieChart>
+                                </ResponsiveContainer>
+                            </div>
+                        </Card>
+                    </div>
                 </div>
             )}
 
